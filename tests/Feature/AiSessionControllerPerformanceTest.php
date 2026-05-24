@@ -78,6 +78,45 @@ class AiSessionControllerPerformanceTest extends TestCase
         $this->assertStringNotContainsString('second-raw', $html);
     }
 
+    public function test_destroy_deletes_session_and_messages_without_form_builder()
+    {
+        $session = AiSession::create([
+            'source' => 'codex',
+            'external_id' => 'session-delete',
+            'title' => 'Delete Session',
+            'message_count' => 2,
+        ]);
+
+        AiMessage::create([
+            'ai_session_id' => $session->id,
+            'seq' => 0,
+            'role' => 'user',
+            'type' => 'message',
+            'content' => 'delete me',
+        ]);
+        AiMessage::create([
+            'ai_session_id' => $session->id,
+            'seq' => 1,
+            'role' => 'assistant',
+            'type' => 'message',
+            'content' => 'delete me too',
+        ]);
+
+        $response = app(AiSessionController::class)->destroy($session->id);
+
+        $this->assertSame(200, $response->getStatusCode());
+        $this->assertSame([
+            'status' => true,
+            'data' => [
+                'message' => '删除成功',
+                'type' => 'success',
+                'alert' => true,
+            ],
+        ], $response->getData(true));
+        $this->assertDatabaseMissing('ai_sessions', ['id' => $session->id]);
+        $this->assertDatabaseMissing('ai_messages', ['ai_session_id' => $session->id]);
+    }
+
     private function renderTimeline(AiSession $session, Request $request)
     {
         $controller = app(AiSessionController::class);

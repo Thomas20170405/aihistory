@@ -14,6 +14,6 @@ Route::group([
 
     $router->get('/', 'HomeController@index');
     $router->get('ai-sessions/{session}/messages/{message}/raw', 'AiSessionController@raw');
-    $router->resource('ai-sessions', 'AiSessionController')->only(['index', 'show', 'destroy']);
+    $router->resource('ai-sessions', 'AiSessionController')->only(['index', 'show', 'edit', 'update', 'destroy']);
 
 });

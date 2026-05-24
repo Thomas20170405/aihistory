@@ -4,10 +4,14 @@ namespace App\Admin\Controllers;
 
 use App\Models\AiMessage;
 use App\Models\AiSession;
+use Dcat\Admin\Form;
 use Dcat\Admin\Grid;
 use Dcat\Admin\Http\Controllers\AdminController;
+use Dcat\Admin\Http\JsonResponse;
 use Dcat\Admin\Layout\Content;
 use Dcat\Admin\Show;
+use Illuminate\Database\Eloquent\ModelNotFoundException;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Http\Request;
 use Illuminate\Support\Str;
 
@@ -41,6 +45,49 @@ class AiSessionController extends AdminController
         }
 
         return $html;
+    }
+
+    public function destroy($id)
+    {
+        $ids = $this->deleteIds($id);
+
+        if (empty($ids)) {
+            return JsonResponse::make()
+                ->alert()
+                ->error('请选择要删除的会话')
+                ->send();
+        }
+
+        try {
+            DB::transaction(function () use ($ids) {
+                $sessions = AiSession::query()
+                    ->whereKey($ids)
+                    ->lockForUpdate()
+                    ->get();
+
+                if ($sessions->count() !== count($ids)) {
+                    throw (new ModelNotFoundException())->setModel(AiSession::class, $ids);
+                }
+
+                AiMessage::whereIn('ai_session_id', $ids)->delete();
+                AiSession::whereKey($ids)->delete();
+            });
+        } catch (ModelNotFoundException $exception) {
+            return JsonResponse::make()
+                ->alert()
+                ->error('会话不存在或已删除')
+                ->send();
+        } catch (\Throwable $exception) {
+            return JsonResponse::make()
+                ->alert()
+                ->error($exception->getMessage() ?: '删除失败')
+                ->send();
+        }
+
+        return JsonResponse::make()
+            ->alert()
+            ->success('删除成功')
+            ->send();
     }
 
     protected function grid()
@@ -106,7 +153,15 @@ class AiSessionController extends AdminController
             });
 
             $grid->disableCreateButton();
-            $grid->disableEditButton();
+        });
+    }
+
+    protected function form()
+    {
+        return Form::make(new AiSession(), function (Form $form) {
+            $form->text('title', '标题')
+                ->rules('nullable|string|max:512')
+                ->attribute('maxlength', 512);
         });
     }
 
@@ -128,7 +183,6 @@ class AiSessionController extends AdminController
             return '<pre style="white-space:pre-wrap;max-height:260px;overflow:auto;">'.e(json_encode($value, JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT)).'</pre>';
         })->unescape();
 
-        $show->disableEditButton();
         $show->disableDeleteButton();
 
         return $show;
@@ -176,6 +230,23 @@ class AiSessionController extends AdminController
         $html .= '</div><div class="box-footer">'.$messages->appends($request->except('page'))->links().'</div></div>';
 
         return $html;
+    }
+
+    private function deleteIds($id)
+    {
+        $ids = request()->input('_key', $id);
+        $ids = is_array($ids) ? $ids : explode(',', (string) $ids);
+
+        return collect($ids)
+            ->map(function ($value) {
+                return trim((string) $value);
+            })
+            ->filter(function ($value) {
+                return $value !== '';
+            })
+            ->unique()
+            ->values()
+            ->all();
     }
 
     private function rawMessageHtml(AiSession $session, AiMessage $message)

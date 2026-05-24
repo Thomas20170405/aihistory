@@ -8,7 +8,6 @@ container. It uses only the Python standard library.
 import argparse
 import glob
 import json
-import os
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -108,6 +107,131 @@ def export_codex(codex_home):
             session["title"] = Path(file_path).stem
 
         yield session
+
+    for session in export_codex_external_imports(codex_home):
+        yield session
+
+
+def export_codex_external_imports(codex_home):
+    index_path = codex_home / "external_agent_session_imports.json"
+    if not index_path.exists():
+        return
+
+    try:
+        data = json.loads(index_path.read_text(encoding="utf-8"))
+    except Exception:
+        return
+
+    records = data if isinstance(data, list) else data.get("records", []) if isinstance(data, dict) else []
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        imported_thread_id = record.get("imported_thread_id")
+        source_path = record.get("source_path")
+        if not imported_thread_id or not source_path:
+            continue
+
+        yield parse_claude_external_session(record, normalize_windows_long_path(source_path))
+
+
+def parse_claude_external_session(record, source_path):
+    file_path = Path(source_path)
+    session = {
+        "source": "codex",
+        "external_id": f"external:{record.get('imported_thread_id')}",
+        "title": None,
+        "workspace_path": None,
+        "model": None,
+        "started_at": None,
+        "ended_at": None,
+        "source_path": str(file_path),
+        "metadata": {
+            "origin": "claude_external_import",
+            "imported_thread_id": record.get("imported_thread_id"),
+            "content_sha256": record.get("content_sha256"),
+            "imported_at": record.get("imported_at"),
+            "source_path": record.get("source_path"),
+            "parse_errors": [],
+        },
+        "messages": [],
+    }
+
+    seq = 0
+    try:
+        with file_path.open("r", encoding="utf-8", errors="replace") as fh:
+            for line_number, line in enumerate(fh, start=1):
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    event = json.loads(line)
+                except Exception as exc:
+                    session["metadata"]["parse_errors"].append({"line": line_number, "error": str(exc)})
+                    continue
+
+                timestamp = event.get("timestamp")
+                if timestamp:
+                    session["started_at"] = min_iso(session["started_at"], timestamp)
+                    session["ended_at"] = max_iso(session["ended_at"], timestamp)
+
+                session["workspace_path"] = event.get("cwd") or session["workspace_path"]
+
+                message = normalize_claude_message(seq, event, timestamp)
+                if not message:
+                    continue
+
+                session["messages"].append(message)
+                if not session["title"] and message["role"] == "user" and message.get("content"):
+                    session["title"] = make_title(message["content"])
+
+                message_model = message["metadata"].get("model")
+                if message_model:
+                    session["model"] = message_model
+
+                seq += 1
+    except Exception as exc:
+        session["metadata"]["parse_errors"].append({"file": str(file_path), "error": str(exc)})
+
+    if not session["title"]:
+        session["title"] = file_path.stem
+
+    return session
+
+
+def normalize_claude_message(seq, event, timestamp):
+    event_type = event.get("type")
+    if event_type not in ("user", "assistant", "system"):
+        return None
+
+    message = event.get("message") if isinstance(event.get("message"), dict) else {}
+    role = message.get("role") or event_type
+    content = message.get("content")
+    if content is None and isinstance(event.get("content"), (str, list, dict)):
+        content = event.get("content")
+
+    if isinstance(content, list):
+        content = extract_text_from_parts(content)
+    elif isinstance(content, dict):
+        content = json.dumps(content, ensure_ascii=False)
+    elif content is not None:
+        content = str(content)
+
+    return {
+        "seq": seq,
+        "role": role,
+        "type": event_type,
+        "occurred_at": timestamp,
+        "content": content,
+        "tool_name": None,
+        "metadata": {
+            "event_type": event_type,
+            "uuid": event.get("uuid"),
+            "parent_uuid": event.get("parentUuid"),
+            "session_id": event.get("sessionId"),
+            "model": message.get("model"),
+        },
+        "raw": event,
+    }
 
 
 def normalize_codex_message(seq, event, payload, timestamp):
@@ -348,6 +472,12 @@ def make_title(value, length=80):
 def shrink_dict(value):
     ignored = {"base_instructions", "developer_instructions", "user_instructions", "dynamic_tools"}
     return {key: item for key, item in value.items() if key not in ignored}
+
+
+def normalize_windows_long_path(value):
+    if isinstance(value, str) and value.startswith("\\\\?\\"):
+        return value[4:]
+    return value
 
 
 def ms_to_iso(value):
